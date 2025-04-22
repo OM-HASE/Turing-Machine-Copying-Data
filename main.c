@@ -1,24 +1,70 @@
 #include <GL/glut.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
-#define MAX_TAPE 100
+#define BOX_WIDTH 0.08f
+#define MAX_TRANSITIONS 100
 
-char tape[MAX_TAPE];
+// ------------------ Data Structures ------------------
+// Linked List Node for Tape
+typedef struct TapeNode {
+    char symbol;
+    struct TapeNode *prev, *next;
+} TapeNode;
+
+// Stack for undo history
+char stack[100];
+int top = -1;
+
+void push(char c) { stack[++top] = c; }
+char pop() { return (top >= 0) ? stack[top--] : 'B'; }
+
+// Queue for transition steps
+char *queue[100];
+int front = 0, rear = 0;
+
+void enqueue(char *msg) { queue[rear++] = msg; }
+char *dequeue() { return (front < rear) ? queue[front++] : ""; }
+
+// Hash map replacement: basic rule mapping
+typedef struct {
+    char state[10];
+    char read;
+    char write;
+    char next_state[10];
+    char move; // 'L' or 'R'
+} Rule;
+
+Rule transition_table[MAX_TRANSITIONS];
+int rule_count = 0;
+
+// Set for visited states
+char visited_states[10][10];
+int visited_count = 0;
+
+int isVisited(char *state) {
+    for (int i = 0; i < visited_count; i++)
+        if (strcmp(visited_states[i], state) == 0) return 1;
+    return 0;
+}
+
+void markVisited(char *state) {
+    if (!isVisited(state)) {
+        strcpy(visited_states[visited_count++], state);
+    }
+}
+
+// ------------------ Turing Machine ------------------
+TapeNode *head = NULL, *tail = NULL;
+TapeNode *read_head = NULL, *write_head = NULL;
+
 char binary[32];
-int input_len = 0;
-int copied = 0;
-int start_index;
+int binary_len = 0;
+char current_state[10] = "q0";
+int copying = 0;
+int running = 0;
 
-int head_read = 1;
-int head_write = 0;
-
-char state[10] = "q0";
-int running = 1;
-char transition_info[50] = "";
-
-// Convert decimal to binary string
 void dec_to_binary(int n) {
     int i = 0;
     while (n > 0) {
@@ -27,88 +73,76 @@ void dec_to_binary(int n) {
     }
     binary[i] = '\0';
 
-    // Reverse binary to get correct order
     for (int j = 0; j < i / 2; j++) {
         char tmp = binary[j];
         binary[j] = binary[i - j - 1];
         binary[i - j - 1] = tmp;
     }
-
-    input_len = i;
+    binary_len = i;
 }
 
-// Initialize tape with binary and C marker
-void init_tape() {
-    for (int i = 0; i < MAX_TAPE; i++) tape[i] = 'B';
+void addTapeSymbol(char symbol) {
+    TapeNode *node = malloc(sizeof(TapeNode));
+    node->symbol = symbol;
+    node->next = NULL;
+    node->prev = tail;
 
-    start_index = 2;
-    for (int i = 0; i < input_len; i++)
-        tape[start_index + i] = binary[i];
-
-    tape[start_index + input_len] = 'C';
-
-    head_read = start_index;
-    head_write = start_index + input_len + 1;
+    if (tail) tail->next = node;
+    else head = node;
+    tail = node;
 }
 
-// Draw text using GLUT
+void initTape() {
+    for (int i = 0; i < 2; i++) addTapeSymbol('B');
+    for (int i = 0; i < binary_len; i++) addTapeSymbol(binary[i]);
+    addTapeSymbol('C');
+    for (int i = 0; i < binary_len + 4; i++) addTapeSymbol('B');
+
+    read_head = head->next->next; // pointing to first binary
+    write_head = read_head;
+    for (int i = 0; i < binary_len + 1; i++) write_head = write_head->next;
+}
+
+// ------------------ OpenGL Drawing ------------------
 void drawText(float x, float y, const char *text) {
     glRasterPos2f(x, y);
     for (int i = 0; text[i]; i++)
         glutBitmapCharacter(GLUT_BITMAP_HELVETICA_18, text[i]);
 }
 
-// Draw the tape, boxes, and heads
 void drawTape() {
-    for (int i = 0; i < 21; i++) {
-        int tapeIndex = start_index - 2 + i;
-        float x = -0.95f + i * 0.09f;
-
-        // Draw tape box
+    TapeNode *temp = head;
+    float x = -0.95f;
+    while (temp) {
         glColor3f(1, 1, 1);
         glBegin(GL_LINE_LOOP);
         glVertex2f(x, -0.2f);
-        glVertex2f(x + 0.08f, -0.2f);
-        glVertex2f(x + 0.08f, 0.2f);
+        glVertex2f(x + BOX_WIDTH, -0.2f);
+        glVertex2f(x + BOX_WIDTH, 0.2f);
         glVertex2f(x, 0.2f);
         glEnd();
 
-        // Draw tape symbol
-        char c = tape[tapeIndex];
-        if (c == 'B') {
-            glColor3f(1, 0, 0); // Red for blank
-        } else if (c == 'C') {
-            glColor3f(1, 0, 1); // Magenta for marker
-        } else {
-            glColor3f(0, 1, 0); // Green for binary digits
-        }
-        drawText(x + 0.03f, 0.0f, (char[]){c, '\0'});
+        // Color based on symbol
+        if (temp->symbol == 'B') glColor3f(1, 0, 0);
+        else if (temp->symbol == 'C') glColor3f(1, 0, 1);
+        else glColor3f(0, 1, 0);
 
-        // Draw read head
-        if (tapeIndex == head_read && strcmp(state, "q1") == 0) {
-            glColor3f(1, 0, 0);
-            drawText(x + 0.025f, 0.3f, "R");
-        }
+        drawText(x + 0.03f, 0.0f, (char[]){temp->symbol, '\0'});
 
-        // Draw write head
-        if (tapeIndex == head_write && strcmp(state, "q1") == 0) {
-            glColor3f(0, 1, 0);
-            drawText(x + 0.025f, 0.4f, "W");
-        }
-
-        // During scan to C
-        if (tapeIndex == head_read && strcmp(state, "q0") == 0) {
-            glColor3f(1, 1, 0);
+        if (temp == read_head && strcmp(current_state, "q1") == 0)
+            drawText(x + 0.03f, 0.3f, "R");
+        if (temp == write_head && strcmp(current_state, "q1") == 0)
+            drawText(x + 0.03f, 0.4f, "W");
+        if (temp == read_head && strcmp(current_state, "q0") == 0)
             drawText(x + 0.03f, 0.3f, "^");
-        }
+
+        temp = temp->next;
+        x += 0.09f;
     }
 
-    // Show state and transition info
     glColor3f(1, 1, 0);
-    char stateLabel[30];
-    sprintf(stateLabel, "State: %s", state);
-    drawText(-0.9f, 0.8f, stateLabel);
-    drawText(-0.9f, 0.7f, transition_info);
+    drawText(-0.9f, 0.8f, current_state);
+    drawText(-0.9f, 0.7f, dequeue());
 }
 
 void display() {
@@ -117,42 +151,49 @@ void display() {
     glutSwapBuffers();
 }
 
-// Turing machine logic step
 void logic_step() {
     if (!running) return;
+    markVisited(current_state);
 
-    if (strcmp(state, "q0") == 0) {
-        if (tape[head_read] == '0' || tape[head_read] == '1') {
-            head_read++;
-            strcpy(transition_info, "q0: scanning to marker 'C'");
-        } else if (tape[head_read] == 'C') {
-            strcpy(state, "q1");
-            head_read = start_index;
-            head_write = start_index + input_len + 1;
-            copied = 0;
-            strcpy(transition_info, "q0->q1: found 'C', start copying");
+    if (strcmp(current_state, "q0") == 0) {
+        if (read_head->symbol == '0' || read_head->symbol == '1') {
+            enqueue("q0: scanning to 'C'");
+            read_head = read_head->next;
+        } else if (read_head->symbol == 'C') {
+            strcpy(current_state, "q1");
+            read_head = head->next->next;
+            write_head = read_head;
+            for (int i = 0; i < binary_len + 1; i++) write_head = write_head->next;
+            enqueue("q0->q1: found C, start copying");
+            copying = 0;
         }
-    } else if (strcmp(state, "q1") == 0) {
-        if (copied < input_len) {
-            char symbol = tape[head_read];
-            tape[head_write] = symbol;
-            head_read++;
-            head_write++;
-            copied++;
-            sprintf(transition_info, "q1: copying '%c' -> tape", symbol);
+    } else if (strcmp(current_state, "q1") == 0) {
+        if (copying < binary_len) {
+            write_head->symbol = read_head->symbol;
+            push(read_head->symbol);
+            enqueue("q1: copying");
+            read_head = read_head->next;
+            write_head = write_head->next;
+            copying++;
         } else {
-            strcpy(state, "q_accept");
-            strcpy(transition_info, "q1->q_accept: done copying");
+            strcpy(current_state, "q_accept");
+            enqueue("q1->q_accept: Done");
             running = 0;
         }
     }
 }
 
-// Timer to auto-step every 500ms
-void timer(int value) {
-    logic_step();
+void timer(int v) {
+    if (running) logic_step();
     glutPostRedisplay();
     if (running) glutTimerFunc(500, timer, 0);
+}
+
+void mouse(int btn, int state, int x, int y) {
+    if (btn == GLUT_LEFT_BUTTON && state == GLUT_DOWN && !running) {
+        running = 1;
+        glutTimerFunc(500, timer, 0);
+    }
 }
 
 void initGL() {
@@ -163,21 +204,21 @@ void initGL() {
 }
 
 int main(int argc, char **argv) {
-    int decimal;
-    printf("Enter a decimal number: ");
-    scanf("%d", &decimal);
+    int num;
+    printf("Enter decimal number: ");
+    scanf("%d", &num);
 
-    dec_to_binary(decimal);
-    init_tape();
+    dec_to_binary(num);
+    initTape();
 
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
     glutInitWindowSize(1000, 400);
-    glutCreateWindow("Turing Machine Copy Visualization");
-    initGL();
+    glutCreateWindow("Turing Machine with DSA");
 
+    initGL();
     glutDisplayFunc(display);
-    glutTimerFunc(500, timer, 0);
+    glutMouseFunc(mouse);
     glutMainLoop();
     return 0;
 }
