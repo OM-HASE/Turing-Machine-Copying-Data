@@ -2,68 +2,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define BOX_WIDTH 0.08f
-#define MAX_TRANSITIONS 100
 
 // ------------------ Data Structures ------------------
-// Linked List Node for Tape
 typedef struct TapeNode {
     char symbol;
     struct TapeNode *prev, *next;
 } TapeNode;
 
-// Stack for undo history
-char stack[100];
-int top = -1;
-
-void push(char c) { stack[++top] = c; }
-char pop() { return (top >= 0) ? stack[top--] : 'B'; }
-
-// Queue for transition steps
-char *queue[100];
-int front = 0, rear = 0;
-
-void enqueue(char *msg) { queue[rear++] = msg; }
-char *dequeue() { return (front < rear) ? queue[front++] : ""; }
-
-// Hash map replacement: basic rule mapping
-typedef struct {
-    char state[10];
-    char read;
-    char write;
-    char next_state[10];
-    char move; // 'L' or 'R'
-} Rule;
-
-Rule transition_table[MAX_TRANSITIONS];
-int rule_count = 0;
-
-// Set for visited states
-char visited_states[10][10];
-int visited_count = 0;
-
-int isVisited(char *state) {
-    for (int i = 0; i < visited_count; i++)
-        if (strcmp(visited_states[i], state) == 0) return 1;
-    return 0;
-}
-
-void markVisited(char *state) {
-    if (!isVisited(state)) {
-        strcpy(visited_states[visited_count++], state);
-    }
-}
-
-// ------------------ Turing Machine ------------------
 TapeNode *head = NULL, *tail = NULL;
-TapeNode *read_head = NULL, *write_head = NULL;
+TapeNode *read_head = NULL;
 
 char binary[32];
 int binary_len = 0;
 char current_state[10] = "q0";
-int copying = 0;
 int running = 0;
+int showDiagram = 0;
+char marked_symbol = '\0'; // New: stores the last marked symbol ('1' or '0')
 
 void dec_to_binary(int n) {
     int i = 0;
@@ -72,7 +29,6 @@ void dec_to_binary(int n) {
         n /= 2;
     }
     binary[i] = '\0';
-
     for (int j = 0; j < i / 2; j++) {
         char tmp = binary[j];
         binary[j] = binary[i - j - 1];
@@ -82,28 +38,24 @@ void dec_to_binary(int n) {
 }
 
 void addTapeSymbol(char symbol) {
-    TapeNode *node = malloc(sizeof(TapeNode));
+    TapeNode *node = (TapeNode *)malloc(sizeof(TapeNode));
     node->symbol = symbol;
     node->next = NULL;
     node->prev = tail;
-
     if (tail) tail->next = node;
     else head = node;
     tail = node;
 }
 
 void initTape() {
-    for (int i = 0; i < 2; i++) addTapeSymbol('B');
+    addTapeSymbol('B');
     for (int i = 0; i < binary_len; i++) addTapeSymbol(binary[i]);
-    addTapeSymbol('C');
+    addTapeSymbol('B');
     for (int i = 0; i < binary_len + 4; i++) addTapeSymbol('B');
-
-    read_head = head->next->next; // pointing to first binary
-    write_head = read_head;
-    for (int i = 0; i < binary_len + 1; i++) write_head = write_head->next;
+    read_head = head;
 }
 
-// ------------------ OpenGL Drawing ------------------
+// ------------------ Drawing ------------------
 void drawText(float x, float y, const char *text) {
     glRasterPos2f(x, y);
     for (int i = 0; text[i]; i++)
@@ -122,18 +74,14 @@ void drawTape() {
         glVertex2f(x, 0.2f);
         glEnd();
 
-        // Color based on symbol
         if (temp->symbol == 'B') glColor3f(1, 0, 0);
         else if (temp->symbol == 'C') glColor3f(1, 0, 1);
+        else if (temp->symbol == 'X' || temp->symbol == 'Y') glColor3f(1, 1, 0);
         else glColor3f(0, 1, 0);
 
         drawText(x + 0.03f, 0.0f, (char[]){temp->symbol, '\0'});
 
-        if (temp == read_head && strcmp(current_state, "q1") == 0)
-            drawText(x + 0.03f, 0.3f, "R");
-        if (temp == write_head && strcmp(current_state, "q1") == 0)
-            drawText(x + 0.03f, 0.4f, "W");
-        if (temp == read_head && strcmp(current_state, "q0") == 0)
+        if (temp == read_head)
             drawText(x + 0.03f, 0.3f, "^");
 
         temp = temp->next;
@@ -142,47 +90,99 @@ void drawTape() {
 
     glColor3f(1, 1, 0);
     drawText(-0.9f, 0.8f, current_state);
-    drawText(-0.9f, 0.7f, dequeue());
 }
 
-void display() {
-    glClear(GL_COLOR_BUFFER_BIT);
-    drawTape();
-    glutSwapBuffers();
-}
-
+// ------------------ Turing Machine Logic ------------------
 void logic_step() {
-    if (!running) return;
-    markVisited(current_state);
+    if (!running || !read_head) return;
 
     if (strcmp(current_state, "q0") == 0) {
+        if (read_head->symbol == 'B') {
+            read_head = read_head->next;
+            strcpy(current_state, "q0b");  // Moved past the first 'B'
+        }
+    }
+    else if (strcmp(current_state, "q0b") == 0) {
         if (read_head->symbol == '0' || read_head->symbol == '1') {
-            enqueue("q0: scanning to 'C'");
+            read_head = read_head->next;
+        } else if (read_head->symbol == 'B') {
+            // This is the second 'B'
+            read_head->symbol = 'C';
+            read_head = head;  // Reset head for copy phase
+            strcpy(current_state, "q1");
+        }
+    }
+    else if (strcmp(current_state, "q1") == 0) {
+        if (read_head->symbol == 'B') {
+            read_head = read_head->next;
+        } else if (read_head->symbol == '1') {
+            read_head->symbol = 'X';
+            marked_symbol = '1'; // Remember marked symbol
+            read_head = read_head->next;
+            strcpy(current_state, "q2");
+        } else if (read_head->symbol == '0') {
+            read_head->symbol = 'Y';
+            marked_symbol = '0'; // Remember marked symbol
+            read_head = read_head->next;
+            strcpy(current_state, "q2");
+        } else if (read_head->symbol == 'C') {
+            strcpy(current_state, "q8");
+        }
+    }
+    else if (strcmp(current_state, "q2") == 0) {
+        if (read_head->symbol == '0' || read_head->symbol == '1') {
             read_head = read_head->next;
         } else if (read_head->symbol == 'C') {
-            strcpy(current_state, "q1");
-            read_head = head->next->next;
-            write_head = read_head;
-            for (int i = 0; i < binary_len + 1; i++) write_head = write_head->next;
-            enqueue("q0->q1: found C, start copying");
-            copying = 0;
-        }
-    } else if (strcmp(current_state, "q1") == 0) {
-        if (copying < binary_len) {
-            write_head->symbol = read_head->symbol;
-            push(read_head->symbol);
-            enqueue("q1: copying");
             read_head = read_head->next;
-            write_head = write_head->next;
-            copying++;
+            strcpy(current_state, "q3");
+        }
+    }
+    else if (strcmp(current_state, "q3") == 0) {
+        if (read_head->symbol == '0' || read_head->symbol == '1') {
+            read_head = read_head->next;
+        } else if (read_head->symbol == 'B') {
+            read_head->symbol = marked_symbol;  // Use stored mark
+            read_head = read_head->prev;
+            strcpy(current_state, "q4");
+        }
+    }
+    else if (strcmp(current_state, "q4") == 0) {
+        if (read_head->symbol != 'C') {
+            read_head = read_head->prev;
         } else {
-            strcpy(current_state, "q_accept");
-            enqueue("q1->q_accept: Done");
+            read_head = read_head->prev;
+            strcpy(current_state, "q5");
+        }
+    }
+    else if (strcmp(current_state, "q5") == 0) {
+        if (read_head->symbol == '0' || read_head->symbol == '1') {
+            read_head = read_head->prev;
+        } else if (read_head->symbol == 'X' || read_head->symbol == 'Y') {
+            read_head = read_head->next;
+            strcpy(current_state, "q1");
+        }
+    }
+    else if (strcmp(current_state, "q8") == 0) {
+        read_head = read_head->prev;
+        strcpy(current_state, "q9");
+    }
+    else if (strcmp(current_state, "q9") == 0) {
+        if (read_head->symbol == 'X') {
+            read_head->symbol = '1';
+            read_head = read_head->prev;
+        } else if (read_head->symbol == 'Y') {
+            read_head->symbol = '0';
+            read_head = read_head->prev;
+        } else if (read_head->symbol == 'C') {
+            read_head = read_head->prev;
+        } else if (read_head->symbol == 'B') {
+            strcpy(current_state, "qhalt");
             running = 0;
         }
     }
 }
 
+// ------------------ GLUT Setup ------------------
 void timer(int v) {
     if (running) logic_step();
     glutPostRedisplay();
@@ -202,6 +202,12 @@ void initGL() {
     glLoadIdentity();
     gluOrtho2D(-1, 1, -1, 1);
 }
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT);
+    drawTape();
+    glutSwapBuffers();
+}
+
 
 int main(int argc, char **argv) {
     int num;
@@ -213,8 +219,8 @@ int main(int argc, char **argv) {
 
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
-    glutInitWindowSize(1000, 400);
-    glutCreateWindow("Turing Machine with DSA");
+    glutInitWindowSize(1000, 600);
+    glutCreateWindow("Turing Machine Copy Binary");
 
     initGL();
     glutDisplayFunc(display);
